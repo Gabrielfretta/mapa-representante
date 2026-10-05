@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rota Comercial — Joinville</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box} body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f5f6f8;color:#17202a}
+header{height:62px;background:#111827;color:white;display:flex;align-items:center;padding:0 18px;gap:18px}
+header h1{font-size:19px;margin:0;white-space:nowrap}
+#search{width:310px;max-width:38vw;border:0;border-radius:8px;padding:10px 12px;font-size:14px}
+.layout{height:calc(100vh - 62px);display:flex}
+.sidebar{width:350px;background:white;padding:16px;overflow:auto;border-right:1px solid #ddd;z-index:1000}
+#map{flex:1;height:100%}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}
+.stat{background:#f3f4f6;border-radius:10px;padding:10px;text-align:center}
+.stat b{display:block;font-size:20px}.stat span{font-size:11px;color:#667085}
+.filters{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+select,button,input{font:inherit}
+select{padding:9px;border:1px solid #d0d5dd;border-radius:8px;background:white}
+button{border:0;border-radius:8px;padding:9px 12px;cursor:pointer}
+.primary{background:#111827;color:#fff}.secondary{background:#e5e7eb;color:#111827}
+#status{font-size:12px;color:#667085;margin:8px 0 12px}
+#list{display:flex;flex-direction:column;gap:8px}
+.item{border:1px solid #e5e7eb;border-radius:10px;padding:10px;cursor:pointer}
+.item:hover{background:#f9fafb}.item .name{font-weight:700;font-size:14px}
+.item .meta{font-size:12px;color:#667085;margin-top:3px}
+.item.visited{border-left:5px solid #16a34a;background:#f0fdf4}
+.badge{display:inline-block;font-size:10px;padding:3px 6px;border-radius:99px;background:#e5e7eb;margin-top:5px}
+.badge.visited{background:#dcfce7;color:#166534}
+.popup h3{margin:0 0 6px}.popup p{margin:4px 0;font-size:13px}.popup button{margin-top:8px;width:100%}
+.legend{position:absolute;bottom:20px;right:20px;background:white;padding:9px 11px;border-radius:9px;box-shadow:0 1px 6px #0002;font-size:12px;z-index:500}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px}.red{background:#ef4444}.green{background:#16a34a}
+@media(max-width:800px){.sidebar{width:100%;height:42%;position:absolute;bottom:0;border-right:0;border-top:1px solid #ddd}.layout{height:calc(100vh - 62px)}#map{height:100%}header h1{font-size:16px}#search{max-width:none;width:45vw}}
+</style>
+</head>
+<body>
+<header>
+<h1>📍 Rota Comercial — Joinville</h1>
+<input id="search" placeholder="Buscar estabelecimento...">
+</header>
+<div class="layout">
+<aside class="sidebar">
+<div class="stats">
+<div class="stat"><b id="total">0</b><span>visíveis</span></div>
+<div class="stat"><b id="visited">0</b><span>visitados</span></div>
+<div class="stat"><b id="pending">0</b><span>pendentes</span></div>
+</div>
+<div class="filters">
+<select id="category"><option value="">Todas categorias</option></select>
+<select id="visitFilter">
+<option value="">Todos</option><option value="pending">Não visitados</option><option value="visited">Visitados</option>
+</select>
+</div>
+<button class="primary" id="reload">↻ Atualizar estabelecimentos</button>
+<button class="secondary" id="clearVisits">Limpar visitas</button>
+<div id="status">Carregando estabelecimentos do mapa...</div>
+<div id="list"></div>
+</aside>
+<div id="map"></div>
+</div>
+<div class="legend"><div><span class="dot red"></span>Não visitado</div><div><span class="dot green"></span>Visitado</div></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map=L.map('map').setView([-26.3044,-48.8487],12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+ attribution:'© OpenStreetMap contributors'
+}).addTo(map);
+
+const markers=L.layerGroup().addTo(map);
+let places=[];
+const visits=JSON.parse(localStorage.getItem('joinville_visits')||'{}');
+
+const categoryNames={
+ pharmacy:'Farmácia', supermarket:'Supermercado', convenience:'Conveniência',
+ clothes:'Roupas', shoes:'Calçados', furniture:'Móveis', electronics:'Eletrônicos',
+ hardware:'Ferragens', beauty:'Beleza', books:'Livraria', bakery:'Padaria',
+ butcher:'Açougue', alcohol:'Bebidas', car:'Automóveis', doityourself:'Construção',
+ department_store:'Loja de departamentos', variety_store:'Variedades', optician:'Ótica',
+ jewelry:'Joalheria', sports:'Esportes', gift:'Presentes', mobile_phone:'Telefonia',
+ bicycle:'Bicicletas', florist:'Floricultura', pet:'Pet shop', toys:'Brinquedos'
+};
+
+function getName(p){return p.tags?.name || p.tags?.['name:pt'] || 'Estabelecimento sem nome'}
+function getCategory(p){
+ const t=p.tags||{};
+ if(t.shop) return t.shop;
+ if(t.amenity) return t.amenity;
+ if(t.office) return 'office';
+ if(t.healthcare) return t.healthcare;
+ if(t.tourism) return t.tourism;
+ return 'outro';
+}
+function getCoords(p){
+ if(p.type==='node') return [p.lat,p.lon];
+ return p.center ? [p.center.lat,p.center.lon] : null;
+}
+function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+
+function icon(visited){
+ return L.divIcon({className:'',html:`<div style="width:15px;height:15px;border-radius:50%;background:${visited?'#16a34a':'#ef4444'};border:2px solid white;box-shadow:0 1px 4px #0008"></div>`,iconSize:[15,15],iconAnchor:[7,7]});
+}
+
+function toggleVisit(id){
+ if(visits[id]) delete visits[id]; else visits[id]=new Date().toISOString();
+ localStorage.setItem('joinville_visits',JSON.stringify(visits));
+ render();
+}
+
+function popup(p){
+ const id=p.type+'/'+p.id, visited=!!visits[id], t=p.tags||{};
+ const name=getName(p), cat=categoryNames[getCategory(p)]||getCategory(p);
+ let address=[t['addr:street'],t['addr:housenumber'],t['addr:suburb']].filter(Boolean).join(', ');
+ let phone=t.phone||t['contact:phone']||'';
+ let website=t.website||t['contact:website']||'';
+ return `<div class="popup"><h3>${esc(name)}</h3>
+ <p><b>Categoria:</b> ${esc(cat)}</p>
+ ${address?`<p>📍 ${esc(address)}</p>`:''}
+ ${phone?`<p>📞 ${esc(phone)}</p>`:''}
+ ${website?`<p>🌐 <a href="${esc(website)}" target="_blank" rel="noopener">Site</a></p>`:''}
+ <p><b>Status:</b> ${visited?'✅ Visitado':'🔴 Não visitado'}</p>
+ <button class="${visited?'secondary':'primary'}" onclick="toggleVisit('${id}')">${visited?'Desmarcar visita':'Marcar como visitado'}</button>
+ </div>`;
+}
+
+function populateCategories(){
+ const vals=[...new Set(places.map(getCategory))].sort();
+ category.innerHTML='<option value="">Todas categorias</option>'+vals.map(v=>`<option value="${esc(v)}">${esc(categoryNames[v]||v)}</option>`).join('');
+}
+function matches(p){
+ const q=search.value.trim().toLowerCase(), c=category.value, vf=visitFilter.value, id=p.type+'/'+p.id;
+ if(q && !getName(p).toLowerCase().includes(q)) return false;
+ if(c && getCategory(p)!==c) return false;
+ if(vf==='visited' && !visits[id]) return false;
+ if(vf==='pending' && visits[id]) return false;
+ return true;
+}
+function render(){
+ markers.clearLayers();
+ const filtered=places.filter(matches);
+ filtered.forEach(p=>{
+   const c=getCoords(p); if(!c)return;
+   const id=p.type+'/'+p.id, m=L.marker(c,{icon:icon(!!visits[id])});
+   m.bindPopup(popup(p)); m.addTo(markers);
+ });
+ total.textContent=filtered.length;
+ visited.textContent=filtered.filter(p=>visits[p.type+'/'+p.id]).length;
+ pending.textContent=filtered.filter(p=>!visits[p.type+'/'+p.id]).length;
+ list.innerHTML=filtered.slice(0,250).map(p=>{
+   const id=p.type+'/'+p.id, v=!!visits[id], c=categoryNames[getCategory(p)]||getCategory(p);
+   return `<div class="item ${v?'visited':''}" onclick="focusPlace('${id}')"><div class="name">${esc(getName(p))}</div><div class="meta">${esc(c)}</div><span class="badge ${v?'visited':''}">${v?'✓ Visitado':'Pendente'}</span></div>`
+ }).join('');
+ status.textContent=filtered.length>250?`Mostrando 250 de ${filtered.length} resultados. Use filtros para refinar.`:`${filtered.length} estabelecimentos carregados.`;
+}
+function focusPlace(id){
+ const p=places.find(x=>x.type+'/'+x.id===id); if(!p)return;
+ const c=getCoords(p); if(!c)return;
+ map.setView(c,17);
+ markers.eachLayer(m=>{if(m.getLatLng().lat===c[0]&&m.getLatLng().lng===c[1])m.openPopup()});
+}
+async function loadPlaces(){
+ status.textContent='Consultando os estabelecimentos do OpenStreetMap...';
+ const b=map.getBounds(), south=b.getSouth(), west=b.getWest(), north=b.getNorth(), east=b.getEast();
+ // Shops, amenities, offices, healthcare and tourism objects inside the current map area.
+ const query=`[out:json][timeout:60];(
+ nwr["shop"](${south},${west},${north},${east});
+ nwr["amenity"](${south},${west},${north},${east});
+ nwr["office"](${south},${west},${north},${east});
+ nwr["healthcare"](${south},${west},${north},${east});
+ nwr["tourism"](${south},${west},${north},${east});
+);out center tags;`;
+ try{
+   const r=await fetch('https://overpass-api.de/api/interpreter?data='+encodeURIComponent(query));
+   if(!r.ok) throw new Error('Falha na API');
+   const data=await r.json();
+   const seen=new Set();
+   places=data.elements.filter(p=>p.tags && getCoords(p) && getName(p)!=='Estabelecimento sem nome' && !seen.has(p.type+'/'+p.id) && seen.add(p.type+'/'+p.id));
+   populateCategories(); render();
+ }catch(e){
+   status.textContent='Não foi possível carregar agora. Tente novamente em alguns segundos.';
+   console.error(e);
+ }
+}
+search.addEventListener('input',render); category.addEventListener('change',render); visitFilter.addEventListener('change',render);
+reload.addEventListener('click',loadPlaces);
+clearVisits.addEventListener('click',()=>{if(confirm('Apagar todas as visitas salvas neste navegador?')){localStorage.removeItem('joinville_visits');location.reload()}});
+loadPlaces();
+</script>
+</body>
+</html>
